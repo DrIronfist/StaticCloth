@@ -1,7 +1,7 @@
 import taichi as ti
 import taichi.math as tm
 
-ti.init(arch=ti.cpu)
+ti.init(arch=ti.gpu)
 
 N = 10
 k = 20
@@ -96,9 +96,6 @@ def updatePoints():
                 uPDisp = tm.distance(points[x, y + 1].pos, curr)
                 if uPDisp > 0:
                     force += k * (uPDisp - springDist) * tm.normalize(points[x, y + 1].pos - curr)
-            if x == 0 and y == 0:
-                print(points[x, y].vel)
-                print(points[x, y].pos)
             points[x, y].vel += force * dt
             points[x, y].pos += points[x, y].vel * dt
 
