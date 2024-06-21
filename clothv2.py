@@ -2,13 +2,13 @@ import taichi as ti
 import taichi.math as tm
 import numpy as np
 
-ti.init(arch=ti.cpu)
+ti.init(arch=ti.gpu)
 
-vec3 = tm.vec3
+vec3 = ti.types.vector(3, dtype=ti.f32)
 N = 10
 kS = ti.field(dtype=ti.f32, shape=())
 kS[None] = 1000
-dt = 1.0 / 500.0
+dt = 1.0 / 200.0
 g = ti.Vector.field(3, ti.f32, shape=())
 g[None] = tm.vec3([0, -9.8, 0])
 
@@ -16,55 +16,45 @@ kD = ti.field(dtype=ti.f32, shape=())
 kD[None] = 1
 
 
-@ti.dataclass
-class Point:
-    position: vec3
-    prevPosition: vec3
-    locked: bool
-    vel: vec3
 
 
-@ti.dataclass
-class Stick:
-    ind_a: tm.ivec2
-    ind_b: tm.ivec2
-    length: ti.f32
 
-
-points = Point.field(shape=(N, N))
-testPoints = ti.Vector.field(3, ti.f32, shape=(N, N))
-sticks = Stick.field(shape=(2 * N * (N - 1)))
+pos = ti.Vector.field(3, ti.f32, shape=(N, N))
+prevPos = ti.Vector.field(3, ti.f32, shape=(N, N))
+velocity = ti.Vector.field(3, ti.f32, shape=(N, N))
+locked = ti.field(dtype=ti.i8, shape=(N, N))
+forces = ti.Vector.field(3, dtype=ti.f32, shape=(N, N))
+indArray = ti.Vector.field(4, dtype=ti.i32, shape=(2 * N * (N - 1)))
+lengths = ti.field(dtype=ti.f32, shape=(2 * N * (N - 1)))
 particles = ti.Vector.field(3, dtype=ti.f32, shape=N * N)
 lines = ti.Vector.field(3, dtype=ti.f32, shape=(4 * N * (N - 1)))
-forces = ti.Vector.field(3, dtype=ti.f32, shape=(N, N))
 
 
 @ti.kernel
 def initPoints():
-
-    for x, y in points:
-        points[x, y].position = [x, y, 0]
-        points[x, y].prevPosition = [x, y, 0]
-        points[x, y].vel = [0, 0, 0]
-        points[x, y].locked = False
-    points[0, N - 1].locked = True
-    points[N - 1, N - 1].locked = True
+    for i in range(N * N):
+        x = i // N
+        y = i % N
+        pos[x, y] = vec3([x, y, 0])
+        prevPos[x, y] = vec3([x, y, 0])
+        velocity[x, y] = [0, 0, 0]
+        locked[x, y] = ti.i8(0)
+    locked[0, N - 1] = ti.i8(1)
+    locked[N - 1, N - 1] = ti.i8(1)
 
     # vertical sticks
     for x in range(N):
         for y in range(N - 1):
             lines_idx = x * (N - 1) + y
-            sticks[lines_idx].ind_a = tm.ivec2(x, y)
-            sticks[lines_idx].ind_b = tm.ivec2(x, y + 1)
-            sticks[lines_idx].length = ti.f32(1.0)
+            indArray[lines_idx] = tm.ivec4(x, y, x, y + 1)
+            lengths[lines_idx] = ti.f32(1.0)
 
     # vertical sticks
     for x in range(N - 1):
         for y in range(N):
             lines_idx = N * (N - 1 + x) + y
-            sticks[lines_idx].ind_a = tm.ivec2(x, y)
-            sticks[lines_idx].ind_b = tm.ivec2(x + 1, y)
-            sticks[lines_idx].length = ti.f32(1.0)
+            indArray[lines_idx] = tm.ivec4(x, y, x + 1, y)
+            lengths[lines_idx] = ti.f32(1.0)
 
 
 initPoints()
@@ -76,15 +66,13 @@ def renderUpdate():
     for x in range(N):
         for y in range(N):
             i = x * 10 + y
-            particles[i] = points[x, y].position
+            particles[i] = pos[x, y]
 
     for i in range(2 * N * (N - 1)):
         ind = 2 * i
-        s = sticks[i]
-        pA = points[s.ind_a.x, s.ind_a.y]
-        pB = points[s.ind_b.x, s.ind_b.y]
-        lines[ind] = pA.position
-        lines[ind + 1] = pB.position
+        s = indArray[i]
+        lines[ind] = pos[s.x, s.y]
+        lines[ind + 1] = pos[s.z, s.w]
 
 
 @ti.kernel
@@ -94,31 +82,38 @@ def update():
             forces[x, y] = g[None]
     ti.sync()
     k = kS[None]
-    for i in range(sticks.shape[0]):
-        s = sticks[i]
-        pA = points[s.ind_a.x, s.ind_a.y]
-        pB = points[s.ind_b.x, s.ind_b.y]
-        l = tm.distance(pA.position, pB.position)
-        if not pA.locked and l != s.length:
-            fDir = tm.normalize(pB.position - pA.position)
-            forces[s.ind_a.x, s.ind_a.y] += k * (l - s.length) * fDir
-        if not pB.locked and l != s.length:
-            fDir = tm.normalize(pA.position - pB.position)
-            forces[s.ind_b.x, s.ind_b.y] += k * (l - s.length) * fDir
+    for i in range(indArray.shape[0]):
+        s = indArray[i]
+        pA = pos[s.x, s.y]
+        pB = pos[s.z, s.w]
+        length = lengths[i]
+        lockA = locked[s.x, s.y]
+        lockB = locked[s.z, s.w]
+        l = tm.distance(pA, pB)
+        if lockA == 0 and l != length:
+            fDir = tm.normalize(pB - pA)
+            forces[s.x, s.y] += k * (l - length) * fDir
+        if lockB == 0 and l != length:
+            fDir = tm.normalize(pA - pB)
+            forces[s.z, s.w] += k * (l - length) * fDir
     ti.sync()
     for i in range(N * N):
         x = i // N
         y = i % N
-        p = points[x, y]
-        if not p.locked:
-            if tm.length(p.vel) != 0:
-                forces[x, y] -= kD[None] * p.vel
-            newPrev = p.position
-            p.position += p.position - p.prevPosition
-            p.position += forces[x, y] * dt * dt
-            p.vel = (p.position - p.prevPosition)/(2 * dt)
-            p.prevPosition = newPrev
-            points[x, y] = p
+        position = pos[x, y]
+        lock = locked[x, y] == 1
+        vel = velocity[x, y]
+        prev = prevPos[x, y]
+        if not lock:
+            if tm.length(vel) != 0:
+                forces[x, y] -= kD[None] * vel
+            newPrev = position
+            position += position - prev
+            position += forces[x, y] * dt * dt
+            vel = (position - prev)/(2 * dt)
+            prevPos[x, y] = newPrev
+            pos[x, y] = position
+            velocity[x, y] = vel
 
 
 window = ti.ui.Window("Cloth", (768, 768))
@@ -140,7 +135,7 @@ while window.running:
         kS[None] += 0.001
     if window.is_pressed(ti.ui.DOWN):
         kS[None] -= 0.001
-
+    #
     update()
     renderUpdate()
     scene.particles(particles, color=(0.68, 0.26, 0.19), radius=0.1)
