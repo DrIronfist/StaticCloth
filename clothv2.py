@@ -9,9 +9,10 @@ kS[None] = 10000
 dt = 1.0 / 200.0
 g = ti.Vector.field(3, ti.f32, shape=())
 g[None] = tm.vec3([0, -9.8, 0])
+sqrt2 = tm.sqrt(2)
 
 kD = ti.field(dtype=ti.f32, shape=())
-kD[None] = 1
+kD[None] = 0.5
 elapsedTime = ti.field(dtype=ti.f32, shape=())
 elapsedTime[None] = 0
 
@@ -20,10 +21,10 @@ prevPos = ti.Vector.field(3, ti.f32, shape=(N, N))
 velocity = ti.Vector.field(3, ti.f32, shape=(N, N))
 locked = ti.field(dtype=ti.i8, shape=(N, N))
 forces = ti.Vector.field(3, dtype=ti.f32, shape=(N, N))
-indArray = ti.Vector.field(4, dtype=ti.i32, shape=(2 * N * (N - 1)))
-lengths = ti.field(dtype=ti.f32, shape=(2 * N * (N - 1)))
+indArray = ti.Vector.field(4, dtype=ti.i32, shape=((N - 1) * (4 * (N - 1) + 1)) + N - 1)
+lengths = ti.field(dtype=ti.f32, shape=((N - 1) * (4 * (N - 1) + 1)) + N - 1)
 particles = ti.Vector.field(3, dtype=ti.f32, shape=N * N)
-lines = ti.Vector.field(3, dtype=ti.f32, shape=(4 * N * (N - 1)))
+lines = ti.Vector.field(3, dtype=ti.f32, shape=(2 * ((N - 1) * (4 * (N - 1) + 1))) + 2 * N - 2)
 mesh_indices = ti.field(dtype=ti.i32, shape=(2 * (N - 1) * (N - 1) * 3))
 triangle_normals = ti.Vector.field(3, dtype=ti.f32, shape=(2 * (N - 1) * (N - 1)))
 vertex_normals = ti.Vector.field(3, dtype=ti.f32, shape=(N * N))
@@ -34,26 +35,31 @@ def initPoints():
     for i in range(N * N):
         x = i // N
         y = i % N
-        pos[x, y] = [x, y, 0]
-        prevPos[x, y] = [x, y, 0]
+        pos[x, y] = [x, 0, y]
+        prevPos[x, y] = [x, 0, y]
         velocity[x, y] = [0, 0, 0]
         locked[x, y] = ti.i8(0)
     locked[0, N - 1] = ti.i8(1)
     locked[N - 1, N - 1] = ti.i8(1)
 
-    # vertical sticks
-    for x in range(N):
-        for y in range(N - 1):
-            lines_idx = x * (N - 1) + y
-            indArray[lines_idx] = tm.ivec4(x, y, x, y + 1)
-            lengths[lines_idx] = ti.f32(1.0)
-
-    # vertical sticks
     for x in range(N - 1):
-        for y in range(N):
-            lines_idx = N * (N - 1 + x) + y
-            indArray[lines_idx] = tm.ivec4(x, y, x + 1, y)
-            lengths[lines_idx] = ti.f32(1.0)
+        for y in range(N - 1):
+            idx = x * (4 * (N - 1) + 1) + y * 4
+            indArray[idx] = tm.ivec4(x, y, x + 1, y)
+            lengths[idx] = ti.f32(1.0)
+            indArray[idx + 1] = tm.ivec4(x, y, x, y + 1)
+            lengths[idx + 1] = ti.f32(1.0)
+            indArray[idx + 2] = tm.ivec4(x, y, x + 1, y + 1)
+            lengths[idx + 2] = sqrt2
+            indArray[idx + 3] = tm.ivec4(x, y + 1, x + 1, y)
+            lengths[idx + 3] = sqrt2
+        indArray[(x + 1) * (4 * (N - 1) + 1) - 1] = tm.ivec4(x, N - 1, x + 1, N - 1)
+        lengths[(x + 1) * (4 * (N - 1) + 1) - 1] = ti.f32(1.0)
+    for i in range(N - 1):
+        idx = (N - 1) * (4 * (N - 1) + 1) + i
+        indArray[idx] = tm.ivec4(N - 1, i, N - 1, i + 1)
+        lengths[idx] = ti.f32(1.0)
+
 
     # mesh indices
     for x in range(N - 1):
@@ -116,7 +122,7 @@ def renderUpdate():
         y = i % N
         particles[i] = pos[x, y]
 
-    for i in range(2 * N * (N - 1)):
+    for i in range(indArray.shape[0]):
         ind = 2 * i
         s = indArray[i]
         lines[ind] = pos[s.x, s.y]
@@ -154,12 +160,12 @@ def update():
         wind = tm.vec3(
             tm.sin(position.x * position.y * t),
             tm.cos(position.z * t),
-            2 * tm.sin(position.x * t / N))
+            5 * tm.sin(position.x * t / N))
         lock = locked[x, y] == 1
         vel = velocity[x, y]
         prev = prevPos[x, y]
         if not lock:
-            forces[x, y] += wind
+            #forces[x, y] += wind
             if tm.length(vel) != 0:
                 forces[x, y] -= kD[None] * vel
             newPrev = position
@@ -173,12 +179,14 @@ def update():
 
 window = ti.ui.Window("Cloth", (768, 768))
 canvas = window.get_canvas()
-canvas.set_background_color((0.5, 0.5, 0.5))
+canvas.set_background_color((0.0, 0.0, 0.0))
 scene = window.get_scene()
 camera = ti.ui.Camera()
 camera.position((N - 1) / 2, (N - 1) / 2, N * 2)
 camera.lookat((N - 1) / 2, (N - 1) / 2, 0)
 camera.up(0, 1, 0)
+sphere = ti.Vector.field(3, dtype=ti.f32, shape=(1))
+sphere[0] = [0, 0, 0]
 
 while window.running:
     camera.track_user_inputs(window, movement_speed=0.5, hold_key=ti.ui.RMB, yaw_speed=10, pitch_speed=10)
@@ -199,7 +207,8 @@ while window.running:
 
     computeVertexNormals()
     scene.particles(particles, color=(0.68, 0.26, 0.19), radius=0.1)
-    scene.lines(lines, color=(0, 0, 0), width=1.0)
-    scene.mesh_instance(vertices=particles, indices=mesh_indices, normals=vertex_normals, color=(0.68, 0.26, 0.19), two_sided=True, show_wireframe=False)
+    # scene.particles(sphere, color=(0.1, 0.1, 0.1), radius=N/2)
+    scene.lines(lines, color=(0.5, 0.5, 0.5), width=1.0)
+    #scene.mesh_instance(vertices=particles, indices=mesh_indices, normals=vertex_normals, color=(0.68, 0.26, 0.19), two_sided=True, show_wireframe=False)
     canvas.scene(scene)
     window.show()
