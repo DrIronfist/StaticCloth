@@ -1,7 +1,7 @@
 import taichi as ti
 import taichi.math as tm
 
-ti.init(arch=ti.gpu)
+ti.init(arch=ti.cpu)
 
 N = 50
 kS = ti.field(dtype=ti.f32, shape=())
@@ -9,10 +9,14 @@ kS[None] = 10000
 dt = 1.0 / 200.0
 g = ti.Vector.field(3, ti.f32, shape=())
 g[None] = tm.vec3([0, -9.8, 0])
+r = N / 2
+sphere = ti.Vector.field(3, dtype=ti.f32, shape=(1))
+sphere[0] = [(N - 1) / 2, (N - 1) / 2, -N * 2]
 sqrt2 = tm.sqrt(2)
 
 kD = ti.field(dtype=ti.f32, shape=())
-kD[None] = 0.5
+kD[None] = 1
+collision_k = 5000.0  # Collision stiffness constant
 elapsedTime = ti.field(dtype=ti.f32, shape=())
 elapsedTime[None] = 0
 
@@ -29,14 +33,13 @@ mesh_indices = ti.field(dtype=ti.i32, shape=(2 * (N - 1) * (N - 1) * 3))
 triangle_normals = ti.Vector.field(3, dtype=ti.f32, shape=(2 * (N - 1) * (N - 1)))
 vertex_normals = ti.Vector.field(3, dtype=ti.f32, shape=(N * N))
 
-
 @ti.kernel
 def initPoints():
     for i in range(N * N):
         x = i // N
         y = i % N
-        pos[x, y] = [x, 0, y]
-        prevPos[x, y] = [x, 0, y]
+        pos[x, y] = [x, y, 0]
+        prevPos[x, y] = [x, y, 0]
         velocity[x, y] = [0, 0, 0]
         locked[x, y] = ti.i8(0)
     locked[0, N - 1] = ti.i8(1)
@@ -60,7 +63,6 @@ def initPoints():
         indArray[idx] = tm.ivec4(N - 1, i, N - 1, i + 1)
         lengths[idx] = ti.f32(1.0)
 
-
     # mesh indices
     for x in range(N - 1):
         for y in range(N - 1):
@@ -72,10 +74,8 @@ def initPoints():
             mesh_indices[idx + 4] = (x + 1) * N + y
             mesh_indices[idx + 5] = (x + 1) * N + y + 1
 
-
 initPoints()
 ti.sync()
-
 
 @ti.kernel
 def computeTriangleNormals():
@@ -90,7 +90,6 @@ def computeTriangleNormals():
             triangle_normals[idx] = tm.normalize(tm.cross(b - a, c - a))
             # Triangle 2: b, d, c
             triangle_normals[idx + 1] = tm.normalize(tm.cross(d - b, c - b))
-
 
 @ti.kernel
 def computeVertexNormals():
@@ -128,14 +127,13 @@ def renderUpdate():
         lines[ind] = pos[s.x, s.y]
         lines[ind + 1] = pos[s.z, s.w]
 
-
-
 @ti.kernel
 def update():
     grav = g[None]
     for i in ti.grouped(forces):
         forces[i] = grav
     ti.sync()
+
     k = kS[None]
     for i in range(indArray.shape[0]):
         s = indArray[i]
@@ -152,7 +150,9 @@ def update():
             fDir = tm.normalize(pA - pB)
             forces[s.z, s.w] += k * (l - length) * fDir
     ti.sync()
+
     t = elapsedTime[None]
+    sPos = sphere[0]
     for i in range(N * N):
         x = i // N
         y = i % N
@@ -165,17 +165,22 @@ def update():
         vel = velocity[x, y]
         prev = prevPos[x, y]
         if not lock:
-            #forces[x, y] += wind
             if tm.length(vel) != 0:
                 forces[x, y] -= kD[None] * vel
+            penetration_depth = r - tm.distance(position, sPos)
+            if penetration_depth > 0:
+                collision_normal = tm.normalize(position - sPos)
+                forces[x, y] += collision_normal * penetration_depth * collision_k
             newPrev = position
-            position += position - prev
-            position += forces[x, y] * dt * dt
-            vel = (position - prev) / (2 * dt)
+            newPosition = position + position - prev + forces[x, y] * dt * dt
+            vel = (newPosition - prev) / (2 * dt)
+            if penetration_depth > 0:
+                collision_normal = tm.normalize(newPosition - sPos)
+                if tm.distance(newPosition, sPos) <= r:
+                    newPosition = sPos + collision_normal * r
             prevPos[x, y] = newPrev
-            pos[x, y] = position
+            pos[x, y] = newPosition
             velocity[x, y] = vel
-
 
 window = ti.ui.Window("Cloth", (768, 768))
 canvas = window.get_canvas()
@@ -185,8 +190,6 @@ camera = ti.ui.Camera()
 camera.position((N - 1) / 2, (N - 1) / 2, N * 2)
 camera.lookat((N - 1) / 2, (N - 1) / 2, 0)
 camera.up(0, 1, 0)
-sphere = ti.Vector.field(3, dtype=ti.f32, shape=(1))
-sphere[0] = [0, 0, 0]
 
 while window.running:
     camera.track_user_inputs(window, movement_speed=0.5, hold_key=ti.ui.RMB, yaw_speed=10, pitch_speed=10)
@@ -196,19 +199,16 @@ while window.running:
     if window.get_event(ti.ui.PRESS):
         if window.event.key == 'r': initPoints()
     if window.is_pressed(ti.ui.UP):
-        kS[None] += 0.001
+        sphere[0].z += 0.1
     if window.is_pressed(ti.ui.DOWN):
-        kS[None] -= 0.001
+        sphere[0].z -= 0.1
     update()
     renderUpdate()
     elapsedTime[None] += dt
 
     computeTriangleNormals()
-
     computeVertexNormals()
-    scene.particles(particles, color=(0.68, 0.26, 0.19), radius=0.1)
-    # scene.particles(sphere, color=(0.1, 0.1, 0.1), radius=N/2)
-    scene.lines(lines, color=(0.5, 0.5, 0.5), width=1.0)
-    #scene.mesh_instance(vertices=particles, indices=mesh_indices, normals=vertex_normals, color=(0.68, 0.26, 0.19), two_sided=True, show_wireframe=False)
+    scene.particles(sphere, color=(0.1, 0.1, 0.1), radius=r)
+    scene.mesh_instance(vertices=particles, indices=mesh_indices, normals=vertex_normals, color=(0.68, 0.26, 0.19), two_sided=True, show_wireframe=False)
     canvas.scene(scene)
     window.show()
